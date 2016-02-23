@@ -1,13 +1,27 @@
-import re
-import os
-import sys
-import sqlite3
+#!/usr/bin/env python3
+
 import argparse
-from peewee import *
-from pyasn1.codec.der import decoder
 from base64 import b64decode
+import os
+import re
+
+from peewee import SqliteDatabase, Model, TextField, IntegerField
+from pyasn1.codec.der import decoder
+
+
+BULK = 140
+
+RE_OPENSSL_BIT_SIZE = re.compile(r'\((\d+) bit\)')
+RE_OPENSSL_GENERATOR = re.compile(r'generator: (\d+) \(')
+RE_OPENSSL_PRIME_NUMBER = re.compile(r'prime:(.*?)generator', re.DOTALL)
+RE_GNUTLS_GENERATOR = re.compile(r'generator:(.*?)prime:', re.DOTALL)
+RE_GNUTLS_PRIME_NUMBER = re.compile(r'prime:(.*?)-----BEGIN', re.DOTALL)
+RE_WHITE = re.compile(r'\s+')
+RE_DH_PARAMETERS = re.compile(r'(-{5}BEGIN DH PARAMETERS.*?END DH PARAMETERS-{5})', re.DOTALL)
+RE_B64_DER = re.compile(r'-{5}BEGIN DH PARAMETERS-{5}\n(.*)\n-{5}END DH PARAMETERS-{5}', re.DOTALL)
 
 db = SqliteDatabase('dhprimes.db')
+
 
 class Primes(Model):
     integer = TextField()
@@ -21,21 +35,25 @@ class Primes(Model):
     class Meta:
         database = db
 
-def create_table():
-    db.create_table(Primes)
+
+def create_table_if_missing():
+    db.create_table(Primes, safe=True)
+
 
 def parse_gnutls_file(text, f):
-    # Check validity of all attributes in a GnuTLS-generated DH param file
-    # since we store it in its entirety.
+    """
+    Check validity of all attributes in a GnuTLS-generated DH param file
+    since we store it in its entirety.
+    """
     regexes = [
-        (r'generator:(.*?)prime:', 'base 16 generator'),
-        (r'prime:(.*?)-----BEGIN', 'base 16 prime number'),
-        (r'(-{5}BEGIN DH PARAMETERS.*?END DH PARAMETERS-{5})', 'DH parameters'),
+        (RE_GNUTLS_GENERATOR, 'base 16 generator'),
+        (RE_GNUTLS_PRIME_NUMBER, 'base 16 prime number'),
+        (RE_DH_PARAMETERS, 'DH parameters'),
     ]
 
     raw_data = []
-    for i, (regex, name) in enumerate(regexes):
-        search = re.search(regex, text, re.DOTALL)
+    for regex, name in regexes:
+        search = regex.search(text)
         if search:
             raw_data.append(search.group(1))
         else:
@@ -43,11 +61,10 @@ def parse_gnutls_file(text, f):
             return
 
     params = {}
-    params['generator'] = int(re.sub(r'\s', r'', raw_data[0]).replace(':', ''), 16)
+    params['generator'] = int(RE_WHITE.sub('', raw_data[0]).replace(':', ''), 16)
     params['pem'] = raw_data[2]
-    params['b64der'] = re.search(r'-{5}BEGIN DH PARAMETERS-{5}\n(.*)\n-{5}END DH PARAMETERS-{5}', \
-                                 raw_data[2], re.DOTALL).group(1).replace('\n', '')
-    params['base16'] = re.sub(r'\s', r'', raw_data[1]).rstrip(':')
+    params['b64der'] = RE_B64_DER.search(raw_data[2]).group(1).replace('\n', '')
+    params['base16'] = RE_WHITE.sub('', raw_data[1]).rstrip(':')
     params['full'] = text
     try:
         params['integer'] = int(params['base16'].replace(':', ''), 16)
@@ -67,19 +84,22 @@ def parse_gnutls_file(text, f):
 
     return params
 
+
 def parse_openssl_file(text, f):
-    # Check validity of all attributes in an OpenSSL-generated DH param
-    # file since we store it in its entirety.
+    """
+    Check validity of all attributes in an OpenSSL-generated DH param
+    file since we store it in its entirety.
+    """
     regexes = [
-        (r'\((\d+) bit\)', 'bit size'),
-        (r'generator: (\d+) \(', 'generator'),
-        (r'prime:(.*?)generator', 'base 16 prime number'),
-        (r'(-{5}BEGIN DH PARAMETERS.*?END DH PARAMETERS-{5})', 'DH parameters'),
+        (RE_OPENSSL_BIT_SIZE, 'bit size'),
+        (RE_OPENSSL_GENERATOR, 'generator'),
+        (RE_OPENSSL_PRIME_NUMBER, 'base 16 prime number'),
+        (RE_DH_PARAMETERS, 'DH parameters'),
     ]
 
     raw_data = []
-    for i, (regex, name) in enumerate(regexes):
-        search = re.search(regex, text, re.DOTALL)
+    for regex, name in regexes:
+        search = regex.search(text)
         if search:
             raw_data.append(search.group(1))
         else:
@@ -90,9 +110,8 @@ def parse_openssl_file(text, f):
     params['bitsize'] = int(raw_data[0])
     params['generator'] = int(raw_data[1])
     params['pem'] = raw_data[3]
-    params['b64der'] = re.search(r'-{5}BEGIN DH PARAMETERS-{5}\n(.*)\n-{5}END DH PARAMETERS-{5}', \
-                                 raw_data[3], re.DOTALL).group(1).replace('\n', '')
-    params['base16'] = re.sub(r'\s', r'', raw_data[2])
+    params['b64der'] = RE_B64_DER.search(raw_data[3]).group(1).replace('\n', '')
+    params['base16'] = RE_WHITE.sub('', raw_data[2])
     params['full'] = text
     try:
         params['integer'] = int(params['base16'].replace(':', ''), 16)
@@ -116,6 +135,7 @@ def parse_openssl_file(text, f):
 
     return params
 
+
 def parse_file(f):
     text = open(f).read()
 
@@ -123,19 +143,17 @@ def parse_file(f):
         return parse_openssl_file(text, f)
     elif 'Recommended key length' in text and 'BEGIN DH PARAMETERS' in text:
         return parse_gnutls_file(text, f)
-    else:
-        return
+
 
 def main():
-
     p = argparse.ArgumentParser(description='Create/Update SQLite database \
                                              with DH primes generated by OpenSSL.')
     p.add_argument('-i', '--input', dest='in_files',
-                 action='store', help='File or directory with DH prime(s)')
+                   action='store', help='File or directory with DH prime(s)')
     p.add_argument('-o', '--out_db', dest='out_db',
-                 action='store', help='Output to database file (default is dhprimes.db)')
+                   action='store', help='Output to database file (default is dhprimes.db)')
     p.add_argument('-p', '--print', dest='print_output',
-                 action='store_true', help='Print output instead of creating database')
+                   action='store_true', help='Print output instead of creating database')
     args = p.parse_args()
 
     if not args.in_files:
@@ -147,27 +165,31 @@ def main():
     all_files = []
     if os.path.isdir(args.in_files):
         for directory, _, files in os.walk(args.in_files):
-            if not '.git' in directory:
-                all_files.extend([ os.path.join(directory, x) for x in files ])
+            if '.git' not in directory:
+                all_files.extend(os.path.join(directory, x) for x in files)
     elif os.path.isfile(args.in_files):
         files.append(args.in_files)
     else:
         p.error('Specified input is not a file or a directory')
 
-    if not Primes.table_exists():
-        create_table()
+    create_table_if_missing()
 
-    # Bulk updates of the database to keep memory usage low. Also Peewee
-    # can't handle more than 100 of these updates in insert_many.
-    for idx in range(0, len(all_files), 100):
-        updates = []
-        for f in all_files[idx:idx+100]:
+    # Bulk updates of the database to keep memory usage low. Also Peewee/SQLite
+    # can't handle more than BULK of these updates in insert_many. It depends
+    # on insert size, so BULK is dependent on data size
+    updates = []
+    with db.atomic():
+        for f in all_files:
             params = parse_file(f)
             if params:
                 updates.append(params)
-        if updates:
-            with db.atomic():
-                Primes.insert_many(updates).execute()
+            if len(updates) > BULK:
+                bulks = len(updates) // BULK
+                for idx in range(bulks):
+                    Primes.insert_many(updates[idx * BULK:idx * BULK + BULK]).execute()
+                updates = updates[bulks * BULK:]
+        Primes.insert_many(updates).execute()
+
 
 if __name__ == '__main__':
     main()
