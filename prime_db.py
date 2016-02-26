@@ -8,7 +8,6 @@ import re
 from peewee import SqliteDatabase, Model, TextField, IntegerField
 from pyasn1.codec.der import decoder
 
-
 BULK = 140
 
 RE_OPENSSL_BIT_SIZE = re.compile(r'\((\d+) bit\)')
@@ -42,8 +41,8 @@ def create_table_if_missing():
 
 def parse_gnutls_file(text, f):
     """
-    Check validity of all attributes in a GnuTLS-generated DH param file
-    since we store it in its entirety.
+    Parse and check validity of all attributes in a GnuTLS-generated DH
+    param file since we store it in its entirety.
     """
     regexes = [
         (RE_GNUTLS_GENERATOR, 'base 16 generator'),
@@ -87,8 +86,8 @@ def parse_gnutls_file(text, f):
 
 def parse_openssl_file(text, f):
     """
-    Check validity of all attributes in an OpenSSL-generated DH param
-    file since we store it in its entirety.
+    Parse and check validity of all attributes in an OpenSSL-generated DH
+    param file since we store it in its entirety.
     """
     regexes = [
         (RE_OPENSSL_BIT_SIZE, 'bit size'),
